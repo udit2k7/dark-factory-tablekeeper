@@ -23,7 +23,7 @@ SQLite must initialize with `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`,
 |---|---|---|
 | `id` | TEXT | primary key; server-generated UUID |
 | `name` | TEXT | not null; trimmed; length 1–200 |
-| `time_zone` | TEXT | not null; canonical IANA zone accepted by `zoneinfo.ZoneInfo` |
+| `time_zone` | TEXT | not null; any valid IANA zone key accepted by `zoneinfo.ZoneInfo`, including backward-compatible aliases |
 | `created_at_utc` | TEXT | not null; RFC 3339 UTC instant |
 
 ### `restaurant_opening_hours`

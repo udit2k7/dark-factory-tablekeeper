@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from src import database
 from src.database import BUSY_TIMEOUT_MS, connect, initialize_database
 from src.main import ReservationCreate, app, create_reservation
 
@@ -17,6 +18,15 @@ from src.main import ReservationCreate, app, create_reservation
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "tablekeeper.db"))
+    if os.environ.get("AUDIT_MUTANT") == "remove_slot_claim_pk":
+        monkeypatch.setattr(
+            database,
+            "SCHEMA",
+            database.SCHEMA.replace(
+                "    PRIMARY KEY (restaurant_id, table_id, slot_start_utc),\n",
+                "",
+            ),
+        )
     with TestClient(app) as test_client:
         yield test_client
 
@@ -106,6 +116,21 @@ def test_tables_enforce_boundaries_conflicts_and_restaurant_scope(client: TestCl
         {"id": "T2", "seats": 2, "unknown": 1},
     ):
         assert client.post(f"/restaurants/{first}/tables", json=payload).status_code == 422
+
+
+def test_table_unexpected_integrity_failure_returns_sanitized_500(client: TestClient) -> None:
+    restaurant_id = create_restaurant(client)
+    with connect() as connection:
+        connection.execute(
+            "CREATE TRIGGER force_table_failure BEFORE INSERT ON restaurant_tables "
+            "BEGIN SELECT RAISE(ABORT, 'forced_table_failure'); END"
+        )
+    response = add_table(client, restaurant_id, "T1", 4)
+    assert response.status_code == 500
+    assert response.json() == {"detail": "internal_error"}
+    assert "forced_table_failure" not in response.text
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM restaurant_tables").fetchone()[0] == 0
 
 
 def test_availability_orders_filters_and_honours_open_boundaries(client: TestClient) -> None:
@@ -249,6 +274,8 @@ def test_database_rejects_capacity_insert_and_update(client: TestClient) -> None
             "INSERT INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             ("ok", "r1", "t1", 2, "2030-01-01T10:00:00Z", "2030-01-01", "10:00", "2030-01-01T00:00:00Z"),
         )
+        if os.environ.get("AUDIT_MUTANT") == "drop_capacity_update":
+            connection.execute("DROP TRIGGER reservations_capacity_update")
         with pytest.raises(sqlite3.IntegrityError, match="capacity_exceeded"):
             connection.execute("UPDATE reservations SET party_size = 3 WHERE id = 'ok'")
 

@@ -232,6 +232,16 @@ def is_slot_claim_uniqueness_conflict(error: sqlite3.IntegrityError) -> bool:
     return claim_key in normalized
 
 
+def is_table_id_uniqueness_conflict(error: sqlite3.IntegrityError) -> bool:
+    normalized = "".join(str(error).lower().split())
+    table_key = (
+        "uniqueconstraintfailed:"
+        "restaurant_tables.restaurant_id,"
+        "restaurant_tables.table_id"
+    )
+    return table_key in normalized
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
@@ -287,9 +297,14 @@ def create_table(restaurant_id: str, payload: TableCreate) -> dict:
                 "INSERT INTO restaurant_tables (restaurant_id, table_id, seats) VALUES (?, ?, ?)",
                 (restaurant_id, payload.id, payload.seats),
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as error:
             rollback(connection)
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="table_already_exists") from None
+            if is_table_id_uniqueness_conflict(error):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="table_already_exists",
+                ) from None
+            raise storage_error(error) from None
         connection.commit()
     except HTTPException:
         raise

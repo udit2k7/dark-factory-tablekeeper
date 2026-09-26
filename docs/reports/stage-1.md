@@ -2,9 +2,9 @@
 
 ## Verdict
 
-**BLOCKED**
+**APPROVED**
 
-The image builds and 24 of 25 contract tests pass under Docker with networking disabled. One HTTP error-classification defect remains: an injected, non-uniqueness SQLite integrity failure between reservation insertion and slot-claim insertion is returned as `409 no_table_available`; the specification requires unexpected storage failures to return `500 internal_error`.
+The current workspace builds successfully and all 26 contract tests pass under Docker with networking disabled. Both HTTP error-classification defects are fixed: only proven table/slot uniqueness conflicts map to `409`; injected unrelated integrity failures roll back and return sanitized `500 internal_error`.
 
 ## Scope
 
@@ -28,36 +28,66 @@ The image builds and 24 of 25 contract tests pass under Docker with networking d
 Image build:
 
 ```text
-docker build -t tablekeeper-stage1-audit:latest stage-1
+docker build -t tablekeeper-stage1-table-fix:latest stage-1
 exit 0
 ```
 
 Required isolated suite:
 
 ```text
-docker run --rm --network none tablekeeper-stage1-audit:latest python -m pytest -q
-......................F.. [100%]
-FAILED tests/test_stage1.py::test_claim_failure_rolls_back_reservation
-1 failed, 24 passed, 1 warning in 7.50s
-exit 1
+docker run --rm --network none tablekeeper-stage1-table-fix:latest python -m pytest -q
+.......................... [100%]
+26 passed, 1 warning in 7.81s
+exit 0
 ```
 
-The failing test first verifies that both database row counts are zero, so atomic rollback succeeds. It then observes `409` where the contract requires `500`.
+The failure-injection test verifies both database row counts remain zero and the API returns the required sanitized `500`.
+
+Exact local virtual-environment suite:
+
+```text
+.venv\Scripts\python -m pytest stage-1/tests -q
+.......................... [100%]
+26 passed, 1 warning in 8.14s
+exit 0
+```
 
 Protection-removal sensitivity run:
 
 ```text
-docker run --rm --network none -e AUDIT_MUTANT=drop_capacity_insert tablekeeper-stage1-audit:latest python -m pytest -q tests/test_stage1.py::test_database_rejects_capacity_insert_and_update
+docker run --rm --network none -e AUDIT_MUTANT=drop_capacity_insert tablekeeper-stage1-completion:latest python -m pytest -q tests/test_stage1.py::test_database_rejects_capacity_insert_and_update
 FAILED tests/test_stage1.py::test_database_rejects_capacity_insert_and_update
 Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>
-1 failed, 1 warning in 0.53s
+1 failed, 1 warning in 0.45s
 exit 1
 ```
 
 This mutation probe drops only the capacity insert trigger in the temporary test database. The invariant test fails immediately, demonstrating that it detects removal of the database protection.
 
-## Blocking defect
+Capacity-update trigger removal sensitivity run:
 
-`stage-1/src/main.py:396` catches every `sqlite3.IntegrityError` raised by either reservation insertion or claim insertion and maps it to `409 no_table_available`. That mapping is broader than the specified uniqueness-conflict case. The injected `forced_claim_failure` trigger therefore produces a false conflict response instead of the required sanitized `500 internal_error`.
+```text
+docker run --rm --network none -e AUDIT_MUTANT=drop_capacity_update tablekeeper-stage1-update-mutation:latest python -m pytest -q tests/test_stage1.py::test_database_rejects_capacity_insert_and_update
+FAILED tests/test_stage1.py::test_database_rejects_capacity_insert_and_update
+Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>
+1 failed, 1 warning in 0.44s
+exit 1
+```
 
-Acceptance requires distinguishing slot-claim uniqueness conflicts from other integrity failures, preserving the verified rollback behavior, and rerunning the same network-disabled suite to 25 passed.
+The control run of the same focused test with the trigger intact passed (`1 passed, 1 warning in 0.51s`). The scratch mutation drops only `reservations_capacity_update`; an oversized update then succeeds and the guarding assertion fails.
+
+Slot-claim primary-key removal sensitivity run:
+
+```text
+docker run --rm --network none -e AUDIT_MUTANT=remove_slot_claim_pk tablekeeper-stage1-completion:latest python -m pytest -q tests/test_stage1.py::test_database_rejects_duplicate_mismatched_and_orphan_claims
+FAILED tests/test_stage1.py::test_database_rejects_duplicate_mismatched_and_orphan_claims
+Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>
+1 failed, 1 warning in 0.46s
+exit 1
+```
+
+This mutation removes only `PRIMARY KEY (restaurant_id, table_id, slot_start_utc)` from the temporary test schema. The duplicate-claim invariant test fails immediately.
+
+## Resolved defect
+
+Reservation creation distinguishes the composite slot-claim uniqueness error from other `sqlite3.IntegrityError` instances. Table creation likewise maps only the composite restaurant/table uniqueness conflict to `409`; an injected trigger failure returns sanitized `500` and leaves no table row. Both targeted regressions and the complete isolated suite pass; no blocking defect remains in the Stage 1 scope.

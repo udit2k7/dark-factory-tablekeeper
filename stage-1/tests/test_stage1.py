@@ -295,10 +295,10 @@ def test_claim_failure_rolls_back_reservation(client: TestClient) -> None:
         f"/restaurants/{restaurant_id}/reservations",
         json={"date": "2030-05-20", "time": "19:15", "party_size": 2},
     )
-    assert response.status_code == 500
     with connect() as connection:
         assert connection.execute("SELECT count(*) FROM reservations").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM reservation_slot_claims").fetchone()[0] == 0
+    assert response.status_code == 500
 
 
 def test_write_lock_exhaustion_returns_sanitized_503(client: TestClient) -> None:

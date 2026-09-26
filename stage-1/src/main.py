@@ -221,6 +221,17 @@ def storage_error(error: sqlite3.Error) -> HTTPException:
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal_error")
 
 
+def is_slot_claim_uniqueness_conflict(error: sqlite3.IntegrityError) -> bool:
+    normalized = "".join(str(error).lower().split())
+    claim_key = (
+        "uniqueconstraintfailed:"
+        "reservation_slot_claims.restaurant_id,"
+        "reservation_slot_claims.table_id,"
+        "reservation_slot_claims.slot_start_utc"
+    )
+    return claim_key in normalized
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
@@ -393,9 +404,14 @@ def create_reservation(restaurant_id: str, payload: ReservationCreate) -> dict:
                 """,
                 (restaurant_id, table["table_id"], slot_start_utc, reservation_id),
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as error:
             rollback(connection)
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="no_table_available") from None
+            if is_slot_claim_uniqueness_conflict(error):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="no_table_available",
+                ) from None
+            raise storage_error(error) from None
         connection.commit()
     except HTTPException:
         rollback(connection)

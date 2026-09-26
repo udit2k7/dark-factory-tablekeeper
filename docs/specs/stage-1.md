@@ -109,7 +109,7 @@ Responses: `200` with `{"date":"...","time":"...","party_size":2,"available_tabl
 
 Request: `{"date":"2030-05-20","time":"19:15","party_size":2}`. The server assigns a table according to I5.
 
-Responses: `201` with `{id,restaurant_id,table_id,party_size,date,time,slot_start_utc}`; `404` if the restaurant does not exist; `409` with `{"detail":"no_table_available"}` when no fitting unclaimed table can be committed; `422` for invalid party size/date/time, non-aligned time, invalid/ambiguous DST wall time, or a slot outside opening hours; `503` with `{"detail":"database_busy"}` after the bounded SQLite busy timeout; `500` for unexpected failure.
+Responses: `201` with `{id,restaurant_id,table_id,party_size,date,time,slot_start_utc}`; `404` if the restaurant does not exist; `409` with `{"detail":"no_table_available"}` only when no fitting unclaimed table can be committed, including a verified composite-primary-key collision on the selected slot claim; `422` for invalid party size/date/time, non-aligned time, invalid/ambiguous DST wall time, or a slot outside opening hours; `503` with `{"detail":"database_busy"}` after the bounded SQLite busy timeout; `500` with `{"detail":"internal_error"}` for every other integrity or unexpected storage failure.
 
 ## Concurrency strategy
 
@@ -119,7 +119,7 @@ Reservation creation uses one database connection and one explicit transaction:
 2. Validate the restaurant, local time, opening hours, and candidate capacity.
 3. Select the first fitting unclaimed table ordered by `seats, table_id`.
 4. Insert the reservation, then its slot claim, and commit.
-5. On a uniqueness violation, roll back the whole transaction and return `409`; on busy/locked exhaustion, roll back and return `503`.
+5. On an integrity failure, roll back the whole transaction. Return `409` only when the failure is proven to be the expected duplicate `(restaurant_id, table_id, slot_start_utc)` claim race; do not classify by exception type alone. Return sanitized `500 internal_error` for triggers, foreign-key failures, unrelated uniqueness failures, and other integrity failures. On busy/locked exhaustion, roll back and return `503`.
 
 The composite primary key remains the final protection even if selection logic changes or multiple processes race. Availability reads need no write lock and may become stale immediately. Connections are request-scoped and never shared concurrently across threads. Restaurant and table writes also use explicit transactions.
 
@@ -134,6 +134,6 @@ The composite primary key remains the final protection even if selection logic c
 7. Attempt direct duplicate slot-claim insertion; assert the composite primary key rejects it.
 8. Attempt direct reservation insertion or update with `party_size > seats`; assert the database trigger rejects it and no orphan claim remains.
 9. Attempt cross-restaurant table/claim mismatches and orphan foreign keys with `foreign_keys=ON`; assert rejection.
-10. Force a failure between reservation and claim insertion; assert rollback leaves neither row.
+10. Force a non-uniqueness integrity failure between reservation and claim insertion; assert rollback leaves neither row and the API returns sanitized `500 internal_error`, not `409`.
 11. Hold a write lock beyond `busy_timeout`; assert the API returns `503` without leaking SQL or stack details.
 12. Install `stage-1/requirements.txt` into the repository `.venv`, then run `.venv\Scripts\python -m pytest stage-1/tests -q` with no internet access; assert no test depends on DNS, package downloads, external databases, or network services. Confirm the FastAPI server boots from the same `.venv`. Do not build or run `stage-1/Dockerfile` during Stage 1; Docker verification is deferred to the final stage.

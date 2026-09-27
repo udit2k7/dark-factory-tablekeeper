@@ -2,6 +2,10 @@
 
 TableKeeper is a staged FastAPI service that demonstrates database-enforced booking correctness under real multi-process contention. It uses Python 3.11 and SQLite in WAL mode. The project progresses from a core service to four-process contention, durable idempotency and cancellation, then a packaged mixed-operation stress harness.
 
+## How this was built
+
+Three Codex agents collaborated in Band Desktop with separated duties: Architect wrote testable specifications, Builder wrote production artifacts, and Auditor wrote independent tests and reports. The handoff and feedback model is documented in [`factory.md`](factory.md). TableKeeper is released under the [MIT License](LICENSE).
+
 ## Stages
 
 | Stage | Focus |
@@ -35,11 +39,13 @@ The booking transaction follows this order:
 
 `BEGIN IMMEDIATE` serializes competing writers before selection. The slot-claim primary key remains the final database guard. WAL supports concurrent readers, `busy_timeout` lets local contenders wait, foreign keys prevent orphan relationships, and cancellation deletes claims in the same transaction that records the cancelled state.
 
-The Stage 4 mutation mode removes only the slot primary key in a temporary database, injects an overlap, and proves the unchanged audit detects it.
+Capacity is also enforced in SQLite rather than trusted to application checks: insert and update triggers reject any booking whose party size exceeds the selected table's seats. Together, the write-locking transaction, slot-claim composite primary key, and capacity triggers protect the two central allocation invariants at the database boundary.
+
+The Stage 4 mutation mode is an audit-sensitivity proof, not a race result. A controlled probe rebuilds a temporary claim table without the slot primary key and inserts two overlapping claims. The mutant accepts them, while the production schema rejects the second claim. The unchanged audit then reports `double_bookings=1` and exits `2`.
 
 ## Prerequisites
 
-- Python 3.11
+- Python 3.11+ (verified locally on 3.12.10; Docker images use 3.11)
 - A platform toolchain capable of creating a Python virtual environment
 - Docker Desktop or Docker Engine only for container verification
 
@@ -50,7 +56,7 @@ Run commands from the repository root. Each stage has its own requirements file 
 Create the virtual environment once:
 
 ```powershell
-py -3.11 -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\python -m pip install --upgrade pip
 ```
 
@@ -133,9 +139,35 @@ DATABASE_PATH="$(pwd)/$stage/tablekeeper.db" .venv/bin/python -m uvicorn src.mai
 
 ## Docker verification
 
-Build and test a stage by replacing `4` with `1`, `2`, or `3`. The final package also runs its harness without external networking:
+Docker commands are the same on all three platforms. On Windows and macOS, start Docker Desktop first. On Linux, start Docker Engine and ensure the current user can access the daemon.
 
-```text
+### Windows PowerShell
+
+Build and test every stage with external networking disabled:
+
+```powershell
+docker build -t tablekeeper-stage-1 stage-1
+docker run --rm --network none tablekeeper-stage-1 python -m pytest -q
+docker build -t tablekeeper-stage-2 stage-2
+docker run --rm --network none tablekeeper-stage-2 python -m pytest -q
+docker build -t tablekeeper-stage-3 stage-3
+docker run --rm --network none tablekeeper-stage-3 python -m pytest -q
+docker build -t tablekeeper-stage-4 stage-4
+docker run --rm --network none tablekeeper-stage-4 python -m pytest -q
+docker run --rm --network none tablekeeper-stage-4 python tests/stress_harness.py
+```
+
+### macOS and Linux
+
+Run the equivalent commands in `bash` or another POSIX shell:
+
+```bash
+docker build -t tablekeeper-stage-1 stage-1
+docker run --rm --network none tablekeeper-stage-1 python -m pytest -q
+docker build -t tablekeeper-stage-2 stage-2
+docker run --rm --network none tablekeeper-stage-2 python -m pytest -q
+docker build -t tablekeeper-stage-3 stage-3
+docker run --rm --network none tablekeeper-stage-3 python -m pytest -q
 docker build -t tablekeeper-stage-4 stage-4
 docker run --rm --network none tablekeeper-stage-4 python -m pytest -q
 docker run --rm --network none tablekeeper-stage-4 python tests/stress_harness.py
@@ -149,21 +181,26 @@ docker run --rm --network none tablekeeper-stage-4 python tests/stress_harness.p
 
 ## Verified results
 
-Independent reports record these approved full-suite baselines:
+Independent fresh runs record these approved full-suite totals:
 
-| Stage | Windows `.venv` | Docker `--network none` |
-|---|---:|---:|
-| 1 | 26 passed in 8.14s | 26 passed in 7.81s |
-| 2 | 44 passed; five consecutive runs | 44 passed in 51.12s |
-| 3 | 72 passed; three consecutive runs | 72 passed in 86.27s |
-| 4 | 74 passed in 108.40s | 74 passed in 62.25s |
+| Stage | Passed | Failed | Additional evidence |
+|---|---:|---:|---|
+| 1 | 26 | 0 | Windows `.venv` and Docker `--network none` |
+| 2 | 44 | 0 | Five consecutive stable Windows runs plus Docker |
+| 3 | 72 | 0 | Three consecutive Windows runs plus Docker |
+| 4 | 74 | 0 | Windows `.venv` and Docker `--network none` |
 
-The final fresh Windows rerun on 2026-09-27 produced:
+The final stress evidence is:
 
-| Command | Result | Exit |
-|---|---|---:|
-| Normal stress harness | 240 attempts, 181 successes, 59 expected conflicts, 0 errors; all four database audits `0` | 0 |
-| Slot-PK mutation harness | Same HTTP accounting; `double_bookings: 1`, other audits `0` | 2 (expected detection) |
-| Focused harness tests | 2 passed in 10.13s | 0 |
+| Run | Command suffix | Attempts | Successes | Conflicts | Errors | Database audit | Exit |
+|---|---|---:|---:|---:|---:|---|---:|
+| Human, seed 404 | default | 240 | 180 | 60 | 0 | All four violation counts `0` | 0 |
+| Auditor, seed 404 | default | 240 | 181 | 59 | 0 | All four violation counts `0` | 0 |
+| Auditor, seed 7 | `--seed 7` | 240 | 181 | 59 | 0 | All four violation counts `0` | 0 |
+| Slot-PK mutation | `--mutation-disable-slot-pk` | 240 | timing-dependent | timing-dependent | 0 | `double_bookings: 1`; other counts `0` | 2 (expected detection) |
+
+Normal runs produce about 180-181 successes and 59-60 expected conflicts depending on race timing. That split is observational, not a guarantee. The guaranteed acceptance result is `errors=0` and zeros for all four audits: double bookings, over-capacity bookings, duplicate idempotent bookings, and slots left on cancelled bookings.
+
+Mutation mode uses a controlled probe to insert two overlapping claims into a temporary claim table with the slot PK disabled. Production rejects the second claim; the mutant accepts both; the audit reports `double_bookings=1` and exits `2`. This proves audit sensitivity and is not presented as a naturally occurring race outcome. Seed 7 was independently rerun with `.venv\Scripts\python stage-4/tests/stress_harness.py --seed 7`.
 
 The single suite warning reported throughout is a Starlette library deprecation warning for `anyio.abc.BlockingPortal`.

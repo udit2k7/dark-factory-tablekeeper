@@ -36,13 +36,26 @@ Every handoff names one next agent, includes exact file paths, and summarizes th
 - Tests and reports provide independent evidence, including exact commands, outcomes, and protection-removal sensitivity.
 - An `APPROVED` verdict means required evidence passed. A `BLOCKED` verdict names the observed mismatch and sends one focused issue back through the loop.
 
-## Real BLOCKED -> fix -> APPROVED example
+## Real feedback cycles from this project
 
-Stage 1 exposed the value of the separation of duties:
+### 1. Stage 1 booking error over-mapping: BLOCKED -> APPROVED
 
-1. **Auditor blocked the stage.** The network-isolated Docker suite returned `1 failed, 24 passed`. An injected non-uniqueness claim failure correctly rolled back both database rows, but the API returned `409 no_table_available` instead of sanitized `500 internal_error`.
-2. **Architect found the contract ambiguity.** `docs/specs/stage-1.md` had said a uniqueness violation returned `409`, which was broad enough to encourage catching every `sqlite3.IntegrityError`. Architect clarified that only a proven composite slot-claim primary-key race maps to `409`; triggers, foreign-key failures, unrelated uniqueness failures, and other integrity failures map to sanitized `500`.
-3. **Builder made one focused fix.** The implementation narrowed error classification while preserving the already-correct transaction rollback.
-4. **Auditor retested independently.** The same injected failure returned sanitized `500`, left zero booking and claim rows, and the Docker suite passed `25/25`. A later analogous table-error regression brought the maintained Stage 1 suite to `26/26`, as recorded in `docs/reports/stage-1.md`.
+Auditor's network-isolated suite returned `1 failed, 24 passed`. An injected non-uniqueness claim failure rolled back correctly but was mapped to `409 no_table_available` instead of sanitized `500 internal_error`. Architect clarified that only a proven composite slot-claim primary-key collision is a `409`. Builder narrowed the `sqlite3.IntegrityError` mapping without touching tests. Auditor reran the same attack, observed zero partial rows and the correct `500`, and approved the stage.
 
-The loop did not change tests to fit the code, and it did not weaken the invariant. It converted a broad implementation shortcut into a precise contract, a minimal fix, and repeatable evidence.
+### 2. Stage 1 table-creation mismatch found by Architect
+
+During a spec-to-code comparison, Architect found the same broad catch pattern in table creation: every integrity failure became `409 table_already_exists`, although the contract reserved `409` for the table composite-key conflict. Builder added precise conflict recognition. Auditor added an unrelated-trigger regression and confirmed sanitized `500`, no leaked trigger text, zero table rows, and a fully passing 26-test suite.
+
+### 3. Human-found Windows port-leak flake in Stage 2
+
+After an apparently successful audit, the human found an intermittent Windows port-leak flake. The suspected root cause was teardown timing around reused ports and child processes. The harness moved to OS-assigned ephemeral ports, terminated the complete Uvicorn process tree, waited for children, and polled ports until closed. Five consecutive Windows suites passed `44/44` after the fix, confirming stable behavior, and the same suite passed in network-isolated Docker. This cycle shows that human observation remains part of the factory's evidence loop.
+
+### 4. Missing Stage 1 regressions in Stage 2
+
+Stage 2 initially focused on the new four-process race but did not carry the complete Stage 1 contract forward. The human spotted the test-count drop from 26 Stage 1 tests to only 18 Stage 2 tests. The gap was corrected by copying the Stage 1 regression suite byte-for-byte and collecting it against Stage 2's application. The Stage 2 report verifies hash-identical inheritance and a final total of 44 passing tests, so new concurrency work could not silently regress earlier behavior.
+
+### 5. Refusal to fabricate a nonexistent blocker
+
+The human later asked the agents to fix the latest `BLOCKED` report. Architect inspected every `docs/reports/` verdict, report history, and the clean reports/specs worktree; Auditor independently checked the same files. The newest report and all earlier reports were `APPROVED`. No spec was changed and no Builder fix was invented. The agents reported the contradictory premise and requested an exact artifact path instead.
+
+Across these cycles, the rule stayed constant: preserve failing evidence, fix the narrow root cause, rerun independently, and never manufacture work merely to satisfy the shape of a request.

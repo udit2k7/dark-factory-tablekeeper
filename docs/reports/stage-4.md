@@ -4,7 +4,7 @@
 
 **APPROVED**
 
-Stage 4 carries all 72 Stage 3 regressions and adds two harness-verification tests. The final 74-test suite passes on Windows and in Docker with external networking disabled. The standalone mixed-operation harness passes in both environments, and isolated mutation mode deterministically detects a removed slot-claim primary key. The auditor changed only `stage-4/tests/` and this report; application code was not modified.
+Stage 4 carries all 72 Stage 3 regressions and adds nine harness/attack-verification tests. The expanded 81-test suite passes on Windows and in Docker with external networking disabled. The standalone mixed-operation harness passes in both environments, and isolated mutation modes detect removed protections. The auditor changed only `stage-4/tests/` and this report; application code was not modified.
 
 ## Coverage
 
@@ -84,3 +84,50 @@ exit 2
 2 passed in 10.13s
 exit 0
 ```
+
+## Attack-list gap closure (2026-09-27)
+
+### #4 — multiple seeds and scheduling jitter
+
+The seed now deterministically shuffles the 240-operation list and adds bounded per-request release jitter. Three normal real-HTTP runs used four Uvicorn processes and ephemeral ports:
+
+| Seed | Attempts | Successes | Conflicts | Errors | All four audits |
+|---:|---:|---:|---:|---:|---|
+| 7 | 240 | 181 | 59 | 0 | zero |
+| 99 | 240 | 181 | 59 | 0 | zero |
+| 404 | 240 | 181 | 59 | 0 | zero |
+
+Each command exited `0`. Seeds 7 and 99 are permanent parametrized regressions in `test_attack_list.py`.
+
+### #8 — cleanup attacks
+
+Three deterministic Windows tests exercise distinct teardown paths:
+
+- Invalid ASGI target forces startup failure; every spawned process is reaped, all log handles close, and all four ephemeral ports close.
+- A deliberately hanging lifespan forces the bounded startup timeout; the same process/handle/port assertions pass.
+- A `KeyboardInterrupt` raised inside a live four-process cluster propagates only after teardown; all process/handle/port assertions pass.
+
+### #10 — additional isolated mutants
+
+- Keyed-response transaction mutant: a scratch source copy commits the reservation and claim immediately before inserting the idempotency record. `test_idempotency_insert_failure_rolls_back_all_three_rows` fails both `BEFORE` and `AFTER` cases (`2 failed`), proving the regression kills the mutant.
+- Cancellation claim-deletion mutant: a scratch source copy replaces claim deletion with a no-op. `test_cancel_releases_claim_replays_exactly_and_creation_replay_does_not_reclaim` fails (`1 failed`), proving the regression kills the mutant.
+- Mutants are created only under pytest temporary directories; production source and schema are unchanged.
+
+### Expanded-suite results
+
+```text
+.venv\Scripts\python -m pytest stage-4/tests -q
+81 passed, 1 warning in 142.82s (0:02:22)
+exit 0
+
+docker build -t tablekeeper-stage-4:latest stage-4
+exit 0
+
+docker run --rm --network none tablekeeper-stage-4:latest python -m pytest -q
+81 passed, 1 warning in 91.91s (0:01:31)
+exit 0
+```
+
+## Not covered
+
+None for the three requested attack-list gaps. Tests use a deterministic raised `KeyboardInterrupt` rather than platform-specific console signal injection; it exercises the harness's actual `BaseException` teardown path without relying on Windows console attachment state.

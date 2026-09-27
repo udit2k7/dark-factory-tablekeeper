@@ -52,19 +52,15 @@
 
 **On screen:** Hold on the final JSON. Zoom or select `attempts`, `successes`, `conflicts`, `errors`, and `database_audit`.
 
-Expected verified values:
-
-```json
-{"attempts":240,"successes":181,"conflicts":59,"errors":0,"database_audit":{"double_bookings":0,"over_capacity":0,"duplicate_idempotent_bookings":0,"leftover_slots_from_cancelled_bookings":0}}
-```
+The success/conflict split may display as `180/60` or `181/59`; keep the actual terminal result on screen. The invariant values are `"errors":0` and four zero database-audit counts.
 
 **Say:**
 
-> "The run completed 240 requests: 181 successes, 59 expected contention conflicts, and zero errors. The direct database audit found zero double bookings, zero over-capacity bookings, zero duplicate idempotent bookings, and zero claims left behind after cancellation."
+> "The run completed 240 requests: about 180 successes and 60 expected conflicts - the split varies with timing; the zeros never do. We have zero errors, zero double bookings, zero over-capacity bookings, zero duplicate idempotent bookings, and zero claims left behind after cancellation."
 
 ### 1:17-1:29 - Explain the database guard
 
-**On screen:** Briefly open `stage-4/src/database.py` and highlight the composite primary key on restaurant, table, and UTC slot.
+**On screen:** Open the verified DDL file `stage-4/src/database.py`, jump to line 82, and highlight the `reservation_slot_claims` table plus its composite primary key at line 90.
 
 **Say:**
 
@@ -83,7 +79,7 @@ Highlight `"double_bookings":1` and exit code `2`.
 
 **Say:**
 
-> "Now the harness rebuilds only a temporary claim table without that primary key. The same audit catches one double booking and exits two by design. That proves the clean result depends on a real protection, not a test that always passes."
+> "Now the harness rebuilds only a temporary claim table without that primary key. A controlled probe inserts two overlapping claims: production would reject the second, but the mutant accepts both. The audit catches the overlap as one double booking and exits two by design. This proves audit sensitivity; it is not a race result."
 
 ## 1:45-2:30 - Repository tour
 

@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 import os
+import random
 import shutil
 import socket
 import sqlite3
@@ -63,50 +64,66 @@ def port_closed(port: int) -> bool:
 
 
 class Cluster:
-    def __init__(self, database: Path, logs: Path):
+    def __init__(
+        self,
+        database: Path,
+        logs: Path,
+        *,
+        app_target: str = "src.main:app",
+        startup_timeout: float = 25,
+    ):
         self.database = database.resolve()
         self.logs = logs
+        self.app_target = app_target
+        self.startup_timeout = startup_timeout
         self.ports = free_ports()
         self.processes: list[subprocess.Popen] = []
         self.handles = []
 
     def __enter__(self):
-        env = os.environ.copy()
-        env["DATABASE_PATH"] = str(self.database)
-        env["PYTHONPATH"] = str(STAGE_ROOT)
-        for port in self.ports:
-            handle = (self.logs / f"uvicorn-{port}.log").open("w", encoding="utf-8")
-            self.handles.append(handle)
-            process = subprocess.Popen(
-                [sys.executable, "-m", "uvicorn", "src.main:app", "--host", HOST, "--port", str(port)],
-                cwd=STAGE_ROOT,
-                env=env,
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                shell=False,
-            )
-            self.processes.append(process)
-        deadline = time.monotonic() + 25
-        pending = set(self.ports)
-        with httpx.Client(timeout=1, trust_env=False) as client:
-            while pending and time.monotonic() < deadline:
-                for port in tuple(pending):
-                    if self.processes[self.ports.index(port)].poll() is not None:
-                        raise RuntimeError(f"server on {port} exited during startup")
-                    try:
-                        if client.get(f"http://{HOST}:{port}/openapi.json").status_code == 200:
-                            pending.remove(port)
-                    except httpx.HTTPError:
-                        pass
-                if pending:
-                    time.sleep(0.05)
-        if pending:
-            raise RuntimeError(f"startup timeout: {sorted(pending)}")
-        if len({process.pid for process in self.processes}) != PORT_COUNT:
-            raise RuntimeError("servers did not have four distinct PIDs")
-        return self
+        try:
+            env = os.environ.copy()
+            env["DATABASE_PATH"] = str(self.database)
+            env["PYTHONPATH"] = str(STAGE_ROOT)
+            for port in self.ports:
+                handle = (self.logs / f"uvicorn-{port}.log").open("w", encoding="utf-8")
+                self.handles.append(handle)
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "uvicorn", self.app_target, "--host", HOST, "--port", str(port)],
+                    cwd=STAGE_ROOT,
+                    env=env,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    shell=False,
+                )
+                self.processes.append(process)
+            deadline = time.monotonic() + self.startup_timeout
+            pending = set(self.ports)
+            with httpx.Client(timeout=1, trust_env=False) as client:
+                while pending and time.monotonic() < deadline:
+                    for port in tuple(pending):
+                        if self.processes[self.ports.index(port)].poll() is not None:
+                            raise RuntimeError(f"server on {port} exited during startup")
+                        try:
+                            if client.get(f"http://{HOST}:{port}/openapi.json").status_code == 200:
+                                pending.remove(port)
+                        except httpx.HTTPError:
+                            pass
+                    if pending:
+                        time.sleep(0.05)
+            if pending:
+                raise RuntimeError(f"startup timeout: {sorted(pending)}")
+            if len({process.pid for process in self.processes}) != PORT_COUNT:
+                raise RuntimeError("servers did not have four distinct PIDs")
+            return self
+        except BaseException:
+            try:
+                self._cleanup()
+            except Exception as cleanup_error:
+                print(f"startup cleanup also failed: {cleanup_error}", file=sys.stderr)
+            raise
 
-    def __exit__(self, *_):
+    def _cleanup(self):
         for process in self.processes:
             if process.poll() is None:
                 process.terminate()
@@ -123,6 +140,9 @@ class Cluster:
             time.sleep(0.05)
         if not all(port_closed(port) for port in self.ports):
             raise RuntimeError("listener leaked after teardown")
+
+    def __exit__(self, *_):
+        self._cleanup()
 
 
 def post(client: httpx.Client, port: int, path: str, *, body: dict | None = None, key: str | None = None):
@@ -213,7 +233,7 @@ def build_operations(restaurant_id: str, replay_seeds, cancel_seeds):
     return operations
 
 
-def run_workload(cluster: Cluster, operations):
+def run_workload(cluster: Cluster, operations, seed: int):
     release = threading.Event()
     clients = {
         port: httpx.Client(timeout=30, trust_env=False, limits=httpx.Limits(max_connections=80))
@@ -225,6 +245,7 @@ def run_workload(cluster: Cluster, operations):
         kind, method, path, body, key, expected = operation
         port = cluster.ports[index % PORT_COUNT]
         release.wait(timeout=10)
+        time.sleep(random.Random((seed << 16) + index).random() * 0.01)
         try:
             if method == "GET":
                 response = clients[port].get(f"http://{HOST}:{port}{path}")
@@ -349,7 +370,8 @@ def main() -> int:
             with Cluster(database, root) as cluster:
                 restaurant_id, replay_seeds, cancel_seeds = seed(cluster)
                 operations = build_operations(restaurant_id, replay_seeds, cancel_seeds)
-                results = run_workload(cluster, operations)
+                random.Random(args.seed).shuffle(operations)
+                results = run_workload(cluster, operations, args.seed)
                 counts = Counter(result[0] for result in results)
                 summary.update(
                     attempts=len(operations),

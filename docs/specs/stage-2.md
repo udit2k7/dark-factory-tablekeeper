@@ -1,10 +1,14 @@
 # Stage 2 - Multi-Process Reservation Contention
 
+## Amendment - 2026-09-27
+
+The original fixed-port examples are superseded. Every acceptance iteration allocates four distinct free ephemeral ports on numeric loopback, starts one Uvicorn process per port, and distributes requests across all four. Teardown must terminate and reap each complete server process tree, then poll every allocated port until it is confirmed closed before the iteration returns. This amendment is normative wherever older text referred to ports 8001-8004.
+
 ## Scope and acceptance outcome
 
 Stage 2 starts as a behavioral copy of Stage 1 under `stage-2/` and preserves every Stage 1 API, validation rule, database invariant, and error-sanitization rule unless this specification strengthens it. The stack remains Python 3.11, FastAPI, Uvicorn, and SQLite in WAL mode.
 
-The defining acceptance case is 50 simultaneous HTTP reservation requests for the same last available table and 15-minute slot, distributed across four independent Uvicorn OS processes on `127.0.0.1:8001` through `127.0.0.1:8004`, all using one SQLite database file. The exact result must be one `201 Created`, 49 `409 Conflict` responses with `{"detail":"no_table_available"}`, zero `500` responses, zero `503` responses, and exactly one committed reservation/slot claim.
+The defining acceptance case is 50 simultaneous HTTP reservation requests for the same last available table and 15-minute slot, distributed across four independent Uvicorn OS processes on four distinct free ephemeral ports on `127.0.0.1`, all using one SQLite database file. The exact result must be one `201 Created`, 49 `409 Conflict` responses with `{"detail":"no_table_available"}`, zero `500` responses, zero `503` responses, and exactly one committed reservation/slot claim.
 
 Both of these commands must pass without external network access:
 
@@ -79,12 +83,12 @@ Each request opens its own SQLite connection. Reservation creation performs this
 
 `BEGIN DEFERRED`, an availability read before `BEGIN IMMEDIATE`, process-local mutexes, in-memory coordination, and check-then-insert across separate transactions are forbidden. The primary key remains mandatory even though `BEGIN IMMEDIATE` serializes writers.
 
-The four server processes are independent `python -m uvicorn` processes, not Uvicorn workers hidden behind one test client. Each binds one of ports 8001-8004 and receives the same absolute `DATABASE_PATH`. Tests wait for all four processes to answer a real HTTP readiness probe before releasing contenders and always terminate/reap them afterward.
+The four server processes are independent `python -m uvicorn` processes, not Uvicorn workers hidden behind one test client. For each iteration, select four distinct free ports by binding numeric loopback with port `0`, then start one server per selected port; no fixed port may be assumed. Every process receives the same absolute `DATABASE_PATH`. Tests wait for all four processes to answer a real HTTP readiness probe before releasing contenders. In `finally`, they terminate and reap each full process tree, then poll all four ports until closed within a bounded deadline.
 
 ## Multi-process acceptance test contract
 
 1. Create one temporary database, initialize one open restaurant and exactly one fitting table, and leave the target slot unclaimed.
-2. Launch four independent Uvicorn processes on numeric loopback ports 8001-8004 with the same database path and isolated logs.
+2. Allocate four distinct free ephemeral numeric-loopback ports for this iteration, then launch four independent Uvicorn processes with the same database path and isolated logs.
 3. Confirm all four PIDs are distinct and alive. Do not use FastAPI/Starlette `TestClient`, ASGI transports, monkeypatching, or direct route calls.
 4. Prepare 50 identical real HTTP requests. Distribute them across all four ports (each port receives at least one), hold them behind one barrier/event, then release them together.
 5. Bound every client request and the overall run with explicit timeouts so deadlocks fail the test rather than hang it.
@@ -92,7 +96,8 @@ The four server processes are independent `python -m uvicorn` processes, not Uvi
 7. After responses complete, open the shared database directly with a new connection. Assert exactly one reservation and one slot claim exist for the target restaurant/table/slot and their IDs/fields match.
 8. Run a direct overlap query grouped by `(restaurant_id, table_id, slot_start_utc)` with `HAVING COUNT(*) > 1`; assert it returns no rows.
 9. Query each server after the race (or perform an equivalent real HTTP observation) to prove all processes observe the committed claim.
-10. Repeat the race with a fresh database enough times to expose timing-sensitive failures; a minimum of three iterations is required.
+10. Repeat the race with a fresh database and a fresh set of four ephemeral ports enough times to expose timing-sensitive failures; a minimum of three iterations is required.
+11. On every success or failure path, terminate and reap all descendants of the four server roots and poll each allocated port until closed before the next iteration begins.
 
 The 50 clients may be concurrent threads or processes, but every request must cross a real TCP socket to one of the four independent servers.
 
@@ -108,4 +113,4 @@ The 50 clients may be concurrent threads or processes, but every request must cr
 8. Inject a non-uniqueness integrity failure during reservation or table creation; assert full rollback and sanitized `500 internal_error` with no SQL/trigger leakage.
 9. Verify Stage 1 capacity, foreign-key, DST, opening-boundary, deterministic-table, and unknown-field regressions against Stage 2.
 10. Kill/restart one server between setup and contention; confirm the surviving processes still use the shared durable database and no partial booking appears.
-11. Confirm server processes are terminated and reaped on both test success and assertion failure; no ports or database handles may leak into later tests.
+11. Confirm complete server process trees are terminated and reaped on both test success and assertion failure; bounded closed-port polling must prove that no port or database handle leaks into later tests.
